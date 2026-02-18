@@ -282,31 +282,122 @@ df.reset_index(drop=True)
 
 ---
 
-## 14. Working with Supabase
+## 14. Real BingeItBro Data Analysis
+
+This is a real-world example using your actual BingeItBro Supabase database!
+
+### Step 1: Connect & Load All Tables
 
 ```python
+import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
 import os
 
-# Load credentials
 load_dotenv()
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
-
-# Connect
 supabase = create_client(url, key)
 
-# Load data
-response = supabase.table('recommendations').select('*').execute()
+# Load all 3 tables into DataFrames
+recommendations_df = pd.DataFrame(
+    supabase.table("recommendations").select("*").execute().data
+)
+users_df = pd.DataFrame(
+    supabase.table("users").select("*").execute().data
+)
+friends_df = pd.DataFrame(
+    supabase.table("friends").select("*").execute().data
+)
 
-# Convert to DataFrame (list of dicts → DataFrame)
-df = pd.DataFrame(response.data)
+print(f"Recommendations: {len(recommendations_df)} rows")
+print(f"Users: {len(users_df)} rows")
+print(f"Friends: {len(friends_df)} rows")
+```
 
-# Now analyze
-print(df.head())
-print(df.groupby('sender_id').size())
-print(df[df['status'] == 'sent'])
+### Step 2: Explore the Data
+
+```python
+# See what columns exist
+print(recommendations_df.columns.tolist())
+# e.g. ['id', 'sender_id', 'receiver_id', 'movie_id', 'status', 'note', 'created_at']
+
+# First 3 rows
+print(recommendations_df.head(3))
+
+# Data types
+print(recommendations_df.dtypes)
+
+# Missing values
+print(recommendations_df.isnull().sum())
+```
+
+### Step 3: Analyze Recommendations
+
+```python
+# How many recommendations per sender?
+print(recommendations_df.groupby('sender_id').size().sort_values(ascending=False))
+
+# Status distribution (sent / accepted / pending)
+print(recommendations_df['status'].value_counts())
+
+# Only sent recommendations
+sent = recommendations_df[recommendations_df['status'] == 'sent']
+print(f"Sent: {len(sent)}")
+
+# Most recommended movies
+print(recommendations_df['movie_id'].value_counts().head(10))
+```
+
+### Step 4: Cross-Table Analysis (Merge)
+
+```python
+# Join recommendations with users to get names
+recs_with_names = pd.merge(
+    recommendations_df,
+    users_df[['id', 'username']].rename(columns={'id': 'sender_id', 'username': 'sender_name'}),
+    on='sender_id',
+    how='left'
+)
+
+print(recs_with_names[['sender_name', 'movie_id', 'status']].head())
+
+# Who sends the most recommendations?
+top_senders = recs_with_names.groupby('sender_name').size().sort_values(ascending=False)
+print(top_senders.head(5))
+```
+
+### Step 5: Friends Network Analysis
+
+```python
+# How many friends does each user have?
+friend_counts = friends_df.groupby('user_id').size().sort_values(ascending=False)
+print(friend_counts.head(10))
+
+# Average friends per user
+print(f"Average friends per user: {friend_counts.mean():.1f}")
+
+# Users with most friends
+most_connected = friend_counts.head(5)
+print("Most connected users:")
+print(most_connected)
+```
+
+### Step 6: Time-Based Analysis
+
+```python
+# Convert created_at to datetime
+recommendations_df['created_at'] = pd.to_datetime(recommendations_df['created_at'])
+
+# Recommendations per day
+recommendations_df['date'] = recommendations_df['created_at'].dt.date
+daily = recommendations_df.groupby('date').size()
+print("Daily recommendation counts:")
+print(daily)
+
+# Most active day
+most_active = daily.idxmax()
+print(f"Most active day: {most_active} ({daily.max()} recommendations)")
 ```
 
 ---
@@ -340,11 +431,12 @@ python3 day2_02_pandas_operations.py
 ## Key Takeaways
 
 1. **DataFrame = Programmable Spreadsheet** with powerful operations
-2. **List of Dicts** (like Supabase) → Easy DataFrame conversion
+2. **Supabase returns list of dicts** → `pd.DataFrame(response.data)` just works
 3. **Filtering** uses boolean conditions with `&` (AND) and `|` (OR)
 4. **Groupby** always needs an aggregation (`.size()`, `.mean()`, etc.)
-5. **Method Chaining** is powerful: `df.groupby('genre')['rating'].mean().sort_values()`
+5. **Merge** lets you join tables like SQL JOIN
+6. **Real data is messy** → always check `.isnull().sum()` and `.dtypes` first
 
 ---
 
-**Next Steps:** Practice with real data! Load your Supabase tables and explore them with pandas.
+**Next Steps:** Run the analysis on your real BingeItBro data and see what patterns you find!
