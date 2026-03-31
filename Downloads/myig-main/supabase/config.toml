@@ -1,0 +1,37 @@
+project_id = "uqrxaffgnmnaewaaqmmh"
+
+[functions.analyze-outfit]
+verify_jwt = false
+
+[functions.extract-instagram]
+verify_jwt = false
+
+[functions.upload-image]
+verify_jwt = false
+
+[functions.search-products]
+verify_jwt = false
+
+[functions.issue-app-token]
+verify_jwt = false
+
+[functions.guest-access-state]
+verify_jwt = false
+
+[functions.access-state]
+verify_jwt = false
+
+[functions.consume-search]
+verify_jwt = false
+
+[functions.delete-account]
+verify_jwt = false
+
+[functions.sync-entitlement]
+verify_jwt = false
+
+[functions.ingest-analytics]
+verify_jwt = false
+
+[functions.proxy-product-image]
+verify_jwt = false

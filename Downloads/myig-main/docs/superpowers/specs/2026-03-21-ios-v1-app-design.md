@@ -20,7 +20,7 @@ This spec covers iPhone v1 only. It does not include Android, iPad-specific UX, 
 - App shell: Capacitor wrapping the current React codebase.
 - Input methods on the first screen: Instagram URL and photo/screenshot upload, both visible immediately.
 - Guest access: 3 free searches without an account.
-- Signed-in free access: 5 searches after signup/sign-in.
+- Signed-in free access: 7 searches after signup/sign-in.
 - Monetization: Apple in-app subscriptions with monthly and yearly plans.
 - Save/favorites: requires an account.
 - Instagram support: dedicated URL input plus screenshot/photo upload fallback.
@@ -96,8 +96,8 @@ Guests can view results but cannot save products. Tapping save as a guest opens 
 
 ### 5. Limit Transitions
 
-- Guest exhausts 3 searches: show auth sheet with clear copy about unlocking 5 signed-in searches.
-- Signed-in user exhausts 5 searches: show paywall with monthly and yearly plans.
+- Guest exhausts 3 searches: show auth sheet with clear copy about unlocking 7 signed-in searches.
+- Signed-in user exhausts 7 searches: show paywall with monthly and yearly plans.
 - Subscriber opens paywall manually from account: show current status, upgrade/restore controls, and plan comparison.
 
 ### 6. Account
@@ -296,7 +296,7 @@ Guests can run 3 searches. After that, new searches are blocked until signup/sig
 
 ### Signed-In Free Rule
 
-A signed-in user without an active subscription gets 5 searches. This quota is separate from guest usage and persists with the account.
+A signed-in user without an active subscription gets 7 searches. This quota is separate from guest usage and persists with the account.
 
 ### Subscription Rule
 

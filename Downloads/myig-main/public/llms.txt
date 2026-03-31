@@ -1,0 +1,17 @@
+# SearchOutfit
+
+SearchOutfit is an AI outfit search tool that helps people identify clothes, shoes, bags, and accessories from Instagram posts, image URLs, and screenshots, then shop similar products.
+
+Primary URLs:
+- https://searchoutfit.com/
+- https://searchoutfit.com/instagram-outfit-search/
+- https://searchoutfit.com/screenshot-outfit-finder/
+- https://searchoutfit.com/find-clothes-from-photo/
+- https://searchoutfit.com/blog/how-to-find-clothes-from-instagram-posts/
+- https://searchoutfit.com/privacy
+- https://searchoutfit.com/terms
+
+Product notes:
+- Supports public Instagram posts, uploaded screenshots, pasted screenshots, and direct image URLs.
+- Provides best-effort outfit analysis, item detection, and merchant matching.
+- Supports country-biased shopping results for India, United States, United Kingdom, Canada, UAE, and Australia.
