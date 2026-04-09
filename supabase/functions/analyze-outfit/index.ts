@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import { buildAppCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import { getAuthenticatedUser } from "../_shared/auth.ts";
 import { consumeGuestSearchAccess } from "../_shared/search-access-service.ts";
 import {
@@ -26,8 +26,6 @@ type ClaudeResponse = {
     | { type: string; [key: string]: unknown }
   >;
 };
-
-const corsHeaders = buildAppCorsHeaders();
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,6 +60,8 @@ async function callAnthropicWithRetry(request: RequestInit): Promise<Response> {
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAppCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -208,8 +208,15 @@ For each item provide:
 7. "brand_guess" - Your best guess at the brand based on style/quality/context, OR the celebrity's own brand if applicable
 8. "price_estimate" - Realistic price estimate in USD
 9. "confidence" - "high", "medium", or "low" — vary this realistically based on how clearly visible and identifiable the item is
-10. "search_query" - A search query to find this item online. CRITICAL: If "brand" is set, the search query MUST start with the exact brand name (e.g., "Florence by Mills beige linen blazer"). If "brand" is empty but "brand_guess" is a specific brand, include it in the query.
-11. "shopping_links" - Array of 2-3 retailer names where this type of item could be found. If "brand" is detected, the brand's official store MUST be first.
+10. "gender" - The apparent gender the item is designed for: "men", "women", or "unisex". Determine this from the wearer's presentation and the garment's cut/fit.
+11. "search_query" - A highly specific shopping search query to find this EXACT item online. This is CRITICAL for accuracy:
+    - MUST include: gender (mens/womens), exact color(s), distinctive design details (e.g., "color block", "graphic print", "logo text"), material, and garment type.
+    - If "brand" is set, the search query MUST start with the exact brand name.
+    - If the item has visible text/graphics, describe them precisely (e.g., "Marvel logo color block navy red white crew neck sweatshirt mens" NOT just "Marvel sweatshirt").
+    - For licensed/character merchandise (Marvel, Disney, Nike collab, etc.), include the EXACT text/character visible AND the specific design (e.g., "Marvel text logo navy red white color block pullover sweatshirt mens" NOT "Captain America sweatshirt").
+    - Avoid vague queries. "blue sweatshirt" is BAD. "navy blue red white Marvel text color block crew neck pullover sweatshirt mens" is GOOD.
+    - The query should be specific enough that searching it on Google Shopping returns the exact product, not just similar ones.
+12. "shopping_links" - Array of 2-3 retailer names where this type of item could be found. If "brand" is detected, the brand's official store MUST be first.
 
 Also return these top-level fields:
 12. "detected_brand" - The primary brand detected via logo/label in the image, or empty string
@@ -234,13 +241,21 @@ Return as JSON:
   "confidence_score": number (0-100, be realistic - not everything is 94%)
 }
 
-IMPORTANT: 
+IMPORTANT:
 - If you can identify any brand name, logo, or label visible in the image, state it explicitly as brand: "[name]" on the relevant item. This is the HIGHEST priority signal.
 - If the person in the image is a recognizable public figure with their own fashion brand or known brand collaboration, state that as celebrity_brand: "[name]". These fields take priority over style-based matching.
 - Search queries MUST prioritize exact brand names when detected. Never generate generic style-only queries when a brand is known.
 - Vary confidence scores realistically. A clearly visible blazer might be 95%, but partially hidden shoes might be 60%.
 - The overall confidence_score should reflect how well you could identify the items, not a fixed number.
-- Be honest about uncertainty.`;
+- Be honest about uncertainty.
+
+SEARCH QUERY ACCURACY IS CRITICAL:
+- The search_query is used directly in Google Shopping to find the exact product. Vague queries = wrong results.
+- ALWAYS include: the gender (mens/womens), ALL visible colors, distinctive design features (color blocking, graphic prints, logos, text), material, and garment type.
+- For items with visible text/branding: describe the EXACT text visible (e.g., "MARVEL" not "Captain America"), the color arrangement, and the garment style.
+- Example: A navy/red/white color-block sweatshirt with "MARVEL" text should produce: "Marvel logo navy red white color block crew neck pullover sweatshirt mens" — NOT "Marvel sweatshirt" or "Captain America sweatshirt".
+- NEVER substitute what you see with related but different items. If the text says "MARVEL", search for "MARVEL", not for a specific character.
+- Include the target audience (mens/womens/kids) based on the wearer — this prevents returning kids' versions of adult clothing.`;
     const userContent: ClaudeImageContent[] = [];
 
     if (imageBase64) {

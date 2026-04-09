@@ -30,12 +30,10 @@ export function getSupabaseAdmin() {
 }
 
 export function getAppTokenSecret(): string {
-  const secret =
-    Deno.env.get("SEARCHOUTFIT_APP_TOKEN_SECRET")
-    || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const secret = Deno.env.get("SEARCHOUTFIT_APP_TOKEN_SECRET");
 
   if (!secret) {
-    throw new Error("App token secret is not configured");
+    throw new Error("SEARCHOUTFIT_APP_TOKEN_SECRET is not configured");
   }
 
   return secret;
@@ -189,18 +187,35 @@ export function rateLimitHeaders(retryAfter: number): HeadersInit {
   };
 }
 
-export async function requireAppToken(
-  req: Request,
-  requiredScope: string,
-): Promise<{ allowed: true } | { allowed: false; status: number; error: string }> {
+export function requireAllowedAppOrigin(req: Request):
+  | { allowed: true; origin: string | null }
+  | { allowed: false; status: number; error: string; origin: string | null } {
   const origin = getRequestOrigin(req);
   if (!isAllowedOrigin(origin, getAllowedAppOrigins())) {
     return {
       allowed: false,
       status: 403,
       error: "Requests from this origin are not allowed.",
+      origin,
     };
   }
+
+  return { allowed: true, origin };
+}
+
+export async function requireAppToken(
+  req: Request,
+  requiredScope: string,
+): Promise<{ allowed: true } | { allowed: false; status: number; error: string }> {
+  const originCheck = requireAllowedAppOrigin(req);
+  if (!originCheck.allowed) {
+    return {
+      allowed: false,
+      status: originCheck.status,
+      error: originCheck.error,
+    };
+  }
+  const origin = originCheck.origin;
 
   const token = req.headers.get(APP_TOKEN_HEADER);
   if (!token) {

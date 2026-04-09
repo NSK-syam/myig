@@ -1,18 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
+import { buildAuthenticatedCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import { requireAuthenticatedUser } from "../_shared/auth.ts";
 import {
   enforceRateLimit,
   getSupabaseAdmin,
   rateLimitHeaders,
+  requireAllowedAppOrigin,
 } from "../_shared/security.ts";
 import { loadUserSearchAccessState } from "../_shared/search-access-service.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
 
 function normalizeRequestType(value: unknown): "instagram_url" | "image_upload" | "unknown" {
   if (typeof value !== "string") return "unknown";
@@ -34,6 +30,8 @@ function normalizeMetadata(value: unknown): Record<string, unknown> {
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAuthenticatedCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -46,6 +44,14 @@ serve(async (req) => {
   }
 
   try {
+    const originCheck = requireAllowedAppOrigin(req);
+    if (!originCheck.allowed) {
+      return new Response(
+        JSON.stringify({ error: originCheck.error }),
+        { status: originCheck.status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     const auth = await requireAuthenticatedUser(req);
     if ("error" in auth) {
       return new Response(

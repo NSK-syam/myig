@@ -429,7 +429,7 @@ describe("SearchResults", () => {
     expect(screen.getAllByText("The Souled Store").length).toBeGreaterThan(0);
     expect(screen.getAllByText("AJIO").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Urban Warrior Oversized T-Shirt").length).toBeGreaterThan(0);
-    expect(screen.getByText("Oversized Black Jersey Tee")).toBeInTheDocument();
+    expect(screen.getAllByText("Oversized Black Jersey Tee").length).toBeGreaterThan(0);
   });
 
   it("shows explicit per-item store counts even when store titles do not literally match the detected item name", async () => {
@@ -517,7 +517,7 @@ describe("SearchResults", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Tiger Print Oversized Blazer/i })).toHaveTextContent("2 stores");
     });
-    expect(screen.getByRole("button", { name: /Black Crop Top\/Bralette/i })).toHaveTextContent("Tap to search");
+    expect(screen.getByRole("button", { name: /Black Crop Top\/Bralette/i })).toHaveTextContent("1 store");
 
     fireEvent.click(screen.getByRole("button", { name: /Black Crop Top\/Bralette/i }));
     await waitFor(() => {
@@ -666,6 +666,46 @@ describe("SearchResults", () => {
     expect(screen.queryByText("Comparison details unavailable")).not.toBeInTheDocument();
   });
 
+  it("shows a visual-preview fallback card instead of leaving the selected-item panel blank", async () => {
+    mockSearchProductsByImage.mockResolvedValue({
+      products: [
+        {
+          title: "Just Vibing Wine Red Ribbed V-Neck Sweater Top",
+          url: "https://www.lulus.com/products/just-vibing-wine-red-ribbed-v-neck-sweater-top/1234567.html",
+          image: undefined,
+          price: "$29",
+          shipping: "Free delivery on $50+",
+          source: "lulus.com",
+        },
+      ],
+    });
+
+    renderResults({
+      analysis: {
+        ...analysis,
+        items: [
+          {
+            name: "Fitted Ribbed Long Sleeve Top",
+            category: "tops",
+            color: "burgundy",
+            material: "ribbed cotton blend",
+            style: "fitted, long sleeve, v-neck",
+            brand: "H&M",
+            brand_guess: "Zara",
+            price_estimate: "$25",
+            confidence: "medium" as const,
+            search_query: "burgundy fitted ribbed long sleeve top",
+            shopping_links: [],
+          },
+        ],
+      },
+    });
+
+    expect(await screen.findByText("No working product image yet")).toBeInTheDocument();
+    expect(screen.getByText(/Store matches are available below/i)).toBeInTheDocument();
+    expect(screen.getByText("Just Vibing Wine Red Ribbed V-Neck Sweater Top")).toBeInTheDocument();
+  });
+
   it("drops failed visual-match images and falls back to the next working visual result", async () => {
     mockSearchProductsByImage.mockResolvedValue({
       products: [
@@ -673,6 +713,7 @@ describe("SearchResults", () => {
           title: "Primary trench coat match",
           url: "https://shop.example.com/trench-primary",
           image: "https://cdn.example.com/trench-primary.jpg",
+          proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=primary",
           price: "$199",
           source: "Example Shop",
         },
@@ -680,6 +721,7 @@ describe("SearchResults", () => {
           title: "Secondary trench coat match",
           url: "https://shop.example.com/trench-secondary",
           image: "https://cdn.example.com/trench-secondary.jpg",
+          proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=secondary",
           price: "$179",
           source: "Example Shop",
         },
@@ -690,6 +732,7 @@ describe("SearchResults", () => {
             title: "Primary trench coat match",
             url: "https://shop.example.com/trench-primary",
             image: "https://cdn.example.com/trench-primary.jpg",
+            proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=primary",
             price: "$199",
             source: "Example Shop",
           },
@@ -697,6 +740,7 @@ describe("SearchResults", () => {
             title: "Secondary trench coat match",
             url: "https://shop.example.com/trench-secondary",
             image: "https://cdn.example.com/trench-secondary.jpg",
+            proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=secondary",
             price: "$179",
             source: "Example Shop",
           },
@@ -751,6 +795,7 @@ describe("SearchResults", () => {
           title: "Primary trench coat match",
           url: "https://shop.example.com/trench-primary",
           image: "https://cdn.example.com/trench-primary.jpg",
+          proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=primary",
           price: "$199",
           source: "Example Shop",
         },
@@ -761,6 +806,7 @@ describe("SearchResults", () => {
             title: "Primary trench coat match",
             url: "https://shop.example.com/trench-primary",
             image: "https://cdn.example.com/trench-primary.jpg",
+            proxyImageUrl: "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=primary",
             price: "$199",
             source: "Example Shop",
           },
@@ -800,16 +846,12 @@ describe("SearchResults", () => {
     for (const image of images) {
       expect(image).toHaveAttribute(
         "src",
-        expect.stringContaining("/functions/v1/proxy-product-image?"),
-      );
-      expect(image).toHaveAttribute(
-        "src",
-        expect.stringContaining(encodeURIComponent("https://cdn.example.com/trench-primary.jpg")),
+        "https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=primary",
       );
     }
   });
 
-  it("uses raw Google Shopping thumbnails instead of the merchant image proxy", async () => {
+  it("hides Google Shopping-only fallback rows from visible store results", async () => {
     const googleShoppingImage =
       "https://encrypted-tbn2.gstatic.com/shopping?q=tbn:ANd9GcSI3okww6ppLRJ118y8rTdoNy5jO_VqJ9ApI3DHYIGnRCdF8bsOKYyF59F44dqmgNksdMTi_2OlwOlUgK4LStsjdFxXz_0EBdtmhw5KbsfXaG1UV5xr4i9T";
     const googleShoppingUrl =
@@ -861,19 +903,11 @@ describe("SearchResults", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Oversized Belted Trench Coat/i })).toHaveTextContent("1 store");
+      expect(screen.getByRole("button", { name: /Oversized Belted Trench Coat/i })).toHaveTextContent("No direct links yet");
     });
-    expect(screen.getByRole("heading", { name: "H&M Ladies Ribbed Cotton Top" })).toBeInTheDocument();
-    const images = await screen.findAllByAltText("H&M Ladies Ribbed Cotton Top");
-    expect(images.length).toBeGreaterThan(0);
-
-    for (const image of images) {
-      expect(image).toHaveAttribute("src", googleShoppingImage);
-      expect(image).not.toHaveAttribute(
-        "src",
-        expect.stringContaining("/functions/v1/proxy-product-image?"),
-      );
-    }
+    expect(screen.queryByRole("heading", { name: "H&M Ladies Ribbed Cotton Top" })).not.toBeInTheDocument();
+    expect(screen.getByText("No direct store links found yet")).toBeInTheDocument();
+    expect(screen.getByText(/hid them so you only see direct merchant pages/i)).toBeInTheDocument();
   });
 
   it("prefers burgundy visual matches over black ones for a burgundy top", async () => {

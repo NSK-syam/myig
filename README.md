@@ -1,73 +1,74 @@
-# Welcome to your Lovable project
+# SearchOutfit
 
-## Project info
+SearchOutfit is an AI outfit search app that turns Instagram posts, screenshots, and image URLs into detected fashion items and shoppable merchant matches.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## What it does
 
-## How can I edit this code?
+- analyzes outfit photos with AI
+- extracts images from public Instagram posts and carousels
+- detects clothing, accessories, brand clues, colors, and style details
+- searches merchants by market and ranks likely matches
+- supports guest access, saved items, analytics, and magic-link auth
 
-There are several ways of editing your application.
+## Tech stack
 
-**Use Lovable**
+- React 18
+- TypeScript
+- Vite
+- Tailwind CSS
+- Radix UI
+- Supabase Edge Functions and auth
+- Cloudflare Pages for frontend hosting
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+## Local development
 
-Changes made via Lovable will be committed automatically to this repo.
+Requirements:
 
-**Use your preferred IDE**
+- Node.js 18+
+- npm
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+Start the app:
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Build for production:
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+```sh
+npm run build
+```
 
-**Use GitHub Codespaces**
+Run tests:
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+```sh
+npm run test
+```
 
-## What technologies are used for this project?
+## Project structure
 
-This project is built with:
+- `src/` — React app, pages, components, and client-side helpers
+- `public/` — static SEO pages, icons, and crawl assets
+- `supabase/functions/` — backend Edge Functions for analysis, search, auth, and media handling
+- `scripts/` — local utility scripts for assets and maintenance
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Core flows
 
-## How can I deploy this project?
+1. User submits an Instagram URL, screenshot, or image URL
+2. Backend extracts or uploads the image
+3. AI analyzes the outfit and returns structured item data
+4. Product search finds merchant matches for the selected market
+5. Results page shows detected items, visual matches, and store comparisons
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+## Deployment
 
-## Can I connect a custom domain to my Lovable project?
+Frontend is deployed on Cloudflare Pages and backend logic runs on Supabase Edge Functions. Production is served from:
 
-Yes, you can!
+- [searchoutfit.com](https://searchoutfit.com)
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+## Notes
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+- Search quality depends on merchant availability and provider coverage
+- Some merchant images are proxied or enriched server-side when direct thumbnails are missing
+- Search and analysis behavior is tested in-repo with Vitest

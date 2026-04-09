@@ -12,11 +12,14 @@ import {
   enrichProductsWithMerchantPageImages,
   extractProductImageFromHtml,
   getMarketDomainBucket,
+  isProxySafePublicUrl,
   isRetailDomain,
   mergeItemResultGroups,
   mergeRankedProducts,
   parseClaudeFallbackItemSearchPlans,
+  resolveGoogleShoppingFallbackProducts,
   shouldExpandSearchFallback,
+  isGoogleShoppingProductLink,
   toShoppingProduct,
 } from "../../supabase/functions/search-products/helpers";
 import { resolveFallbackSearchMarket, resolveSearchMarket } from "../../supabase/functions/search-products/market";
@@ -26,6 +29,14 @@ describe("collectLensProducts", () => {
     expect(
       isRetailDomain("https://www.thesouledstore.com/product/tss-originals-urban-warrior-oversized-tshirt?gte=1"),
     ).toBe(true);
+  });
+
+  it("allows public merchant URLs for image proxying while rejecting localhost/private addresses", () => {
+    expect(isProxySafePublicUrl("https://www.lulus.com/products/just-vibing-wine-red-ribbed-v-neck-sweater-top/1234567.html")).toBe(true);
+    expect(isProxySafePublicUrl("https://htbboutiqueandshowroom.com/products/v-neck-fitted-top")).toBe(true);
+    expect(isProxySafePublicUrl("http://localhost:3000/test.jpg")).toBe(false);
+    expect(isProxySafePublicUrl("http://192.168.1.24/test.jpg")).toBe(false);
+    expect(isProxySafePublicUrl("http://[::1]/test.jpg")).toBe(false);
   });
 
   it("keeps official organic results on the detected brand domain", () => {
@@ -315,9 +326,38 @@ describe("collectLensProducts", () => {
 
     expect(plans[0]?.queries).toEqual(
       expect.arrayContaining([
-        "burgundy fitted v neck ribbed long sleeve top",
-        "burgundy ribbed knit fitted v neck ribbed long sleeve top",
+        "burgundy fitted v neck ribbed long sleeve top unisex",
+        "burgundy ribbed knit fitted v neck ribbed long sleeve top unisex",
         "H&M burgundy fitted v neck ribbed long sleeve top",
+      ]),
+    );
+  });
+
+  it("defaults conflicting gender hints back to unisex instead of trusting the raw search query", () => {
+    const plans = buildItemSearchPlans(
+      [
+        {
+          item_name: "Marvel Logo Colorblock Crewneck Sweatshirt",
+          brand: "Marvel",
+          search_query: "Marvel logo navy red white color block crew neck pullover sweatshirt mens",
+          color: "navy red white",
+          style: "color block crewneck",
+          category: "tops",
+          gender: "women",
+        },
+      ],
+      "",
+      8,
+    );
+
+    expect(plans[0]?.queries).toContain("Marvel logo navy red white color block crew neck pullover sweatshirt");
+    expect(plans[0]?.queries).not.toContain(
+      "Marvel logo navy red white color block crew neck pullover sweatshirt mens",
+    );
+    expect(plans[0]?.queries).toEqual(
+      expect.arrayContaining([
+        "navy red white marvel logo colorblock crewneck sweatshirt unisex",
+        "Marvel Logo Colorblock Crewneck Sweatshirt unisex",
       ]),
     );
   });
@@ -343,7 +383,26 @@ describe("collectLensProducts", () => {
     expect(queries.length).toBeGreaterThanOrEqual(10);
     expect(queries).toContain("pink knit crop top");
     expect(queries).toContain("ASOS Pink knit crop top");
-    expect(queries).toContain("Pink knit crop top women");
+    expect(queries).toContain("Pink knit crop top unisex");
+  });
+
+  it("does not append a second gender token when the search query is already gender-qualified", () => {
+    const queries = buildShoppingQueries(
+      [
+        {
+          item_name: "Marvel Logo Colorblock Crewneck Sweatshirt",
+          brand: "Marvel",
+          search_query: "Marvel logo navy red white color block crew neck pullover sweatshirt mens",
+          gender: "men",
+        },
+      ],
+      "",
+      6,
+    );
+
+    expect(queries).toContain("Marvel logo navy red white color block crew neck pullover sweatshirt mens");
+    expect(queries).not.toContain("Marvel logo navy red white color block crew neck pullover sweatshirt mens men");
+    expect(queries).not.toContain("Marvel logo navy red white color block crew neck pullover sweatshirt mens unisex");
   });
 
   it("filters non-fashion visual matches even on allowed retail domains", () => {
@@ -445,6 +504,165 @@ describe("collectLensProducts", () => {
     );
   });
 
+  it("deprioritizes Google Shopping fallback links behind direct merchant product URLs", () => {
+    const products = mergeRankedProducts(
+      [[
+        {
+          title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+          url: "https://www.google.com/search?ibp=oshop&q=women+red+fitted+ribbed+long+sleeve+top&prds=pid:12345",
+          image: "https://encrypted-tbn2.gstatic.com/shopping?q=tbn:example",
+          price: "$25",
+          source: "Garage",
+        },
+        {
+          title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+          url: "https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html",
+          image: "https://cdn.garageclothing.com/serene-top.jpg",
+          price: "$25",
+          source: "Garage",
+        },
+      ]],
+      resolveSearchMarket("us"),
+      "",
+      12,
+    );
+
+    expect(products[0]?.url).toBe("https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html");
+    expect(isGoogleShoppingProductLink(products[1]?.url)).toBe(true);
+  });
+
+  it("resolves Google Shopping fallback products into direct merchant seller links", async () => {
+    const fallbackProduct = toShoppingProduct({
+      title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+      link: null,
+      product_link:
+        "https://www.google.com/search?ibp=oshop&q=women+red+fitted+ribbed+long+sleeve+top&prds=pid:12345",
+      product_id: "12345",
+      thumbnail: "https://encrypted-tbn2.gstatic.com/shopping?q=tbn:example",
+      price: "$25",
+      source: "Garage",
+    });
+
+    expect(fallbackProduct).toBeTruthy();
+
+    const resolved = await resolveGoogleShoppingFallbackProducts(
+      [fallbackProduct!],
+      "test-key",
+      resolveSearchMarket("us"),
+      async () =>
+        new Response(
+          JSON.stringify({
+            sellers_results: {
+              online_sellers: [
+                {
+                  name: "Garage",
+                  direct_link: "https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html",
+                  price: "$25",
+                  availability: "In stock online",
+                  shipping: "Free delivery between Apr 3 - 8",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      1,
+    );
+
+    expect(resolved).toEqual([
+      expect.objectContaining({
+        url: "https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html",
+        source: "Garage",
+        price: "$25",
+        availability: "In stock online",
+        shipping: "Free delivery between Apr 3 - 8",
+      }),
+    ]);
+  });
+
+  it("extracts immersive product metadata from Google Shopping fallback results", () => {
+    const product = toShoppingProduct({
+      title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+      link: null,
+      product_link: "https://www.google.com/shopping/product/8968865958490016985?gl=us",
+      serpapi_immersive_product_api:
+        "https://serpapi.com/search.json?engine=google_immersive_product&page_token=test-token",
+      thumbnail: "https://encrypted-tbn2.gstatic.com/shopping?q=tbn:example",
+      price: "$25",
+      source: "Garage",
+    });
+
+    expect(product).toEqual(
+      expect.objectContaining({
+        productId: "8968865958490016985",
+        immersiveProductPageToken: "test-token",
+        immersiveApiUrl:
+          "https://serpapi.com/search.json?engine=google_immersive_product&page_token=test-token",
+      }),
+    );
+  });
+
+  it("resolves Google Shopping fallback products through immersive store offers", async () => {
+    const fallbackProduct = toShoppingProduct({
+      title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+      link: null,
+      product_link: "https://www.google.com/shopping/product/8968865958490016985?gl=us",
+      serpapi_immersive_product_api:
+        "https://serpapi.com/search.json?engine=google_immersive_product&page_token=test-token",
+      thumbnail: "https://encrypted-tbn2.gstatic.com/shopping?q=tbn:example",
+      price: "$25",
+      source: "Garage",
+    });
+
+    expect(fallbackProduct).toBeTruthy();
+
+    const calls: string[] = [];
+    const resolved = await resolveGoogleShoppingFallbackProducts(
+      [fallbackProduct!],
+      "test-key",
+      resolveSearchMarket("us"),
+      async (input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        calls.push(url);
+
+        return new Response(
+          JSON.stringify({
+            product_results: {
+              stores: [
+                {
+                  name: "Garage",
+                  link: "https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html",
+                  title: "Garage Women's Serene Deep V-Neck Long Sleeve Top",
+                  details_and_offers: [
+                    "In stock online",
+                    "Free delivery between Apr 3 - 8",
+                  ],
+                  price: "$25",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+      1,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("engine=google_immersive_product");
+    expect(calls[0]).toContain("page_token=test-token");
+    expect(calls[0]).toContain("api_key=test-key");
+    expect(resolved).toEqual([
+      expect.objectContaining({
+        url: "https://www.garageclothing.com/us/p/serene-deep-v-neck-long-sleeve-top/12345.html",
+        source: "Garage",
+        price: "$25",
+        availability: "In stock online",
+        shipping: "Free delivery between Apr 3 - 8",
+      }),
+    ]);
+  });
+
   it("rejects non-product shopping links like Amazon Live URLs", () => {
     const product = toShoppingProduct({
       title: "Watch How to connect your Google account to XGIMI Horizon ...",
@@ -526,7 +744,7 @@ describe("collectLensProducts", () => {
         itemName: "Fitted Ribbed Long Sleeve Top",
         queries: [
           "Fitted Ribbed Long Sleeve Top",
-          "Fitted Ribbed Long Sleeve Top women",
+          "Fitted Ribbed Long Sleeve Top unisex",
           "Fitted Ribbed Long Sleeve Top buy online",
           "Fitted Ribbed Long Sleeve Top fashion",
         ],
@@ -535,7 +753,7 @@ describe("collectLensProducts", () => {
         itemName: "Mid-Rise Straight Leg Jeans",
         queries: [
           "Mid-Rise Straight Leg Jeans",
-          "Mid-Rise Straight Leg Jeans women",
+          "Mid-Rise Straight Leg Jeans unisex",
           "Mid-Rise Straight Leg Jeans buy online",
           "Mid-Rise Straight Leg Jeans fashion",
         ],
@@ -664,6 +882,39 @@ describe("collectLensProducts", () => {
     ).toBe("https://www.example.com/images/burgundy-top.jpg");
   });
 
+  it("extracts a preload image fallback from merchant html", () => {
+    const html = `
+      <html>
+        <head>
+          <link rel="preload" as="image" href="/cdn/products/marvel-sweatshirt-main.jpg" />
+        </head>
+      </html>
+    `;
+
+    expect(
+      extractProductImageFromHtml(html, "https://www.example.com/product/marvel-sweatshirt"),
+    ).toBe("https://www.example.com/cdn/products/marvel-sweatshirt-main.jpg");
+  });
+
+  it("extracts an inline product image from img markup when meta tags are absent", () => {
+    const html = `
+      <html>
+        <body>
+          <img src="/assets/logo.svg" alt="logo" />
+          <img
+            src="/images/marvel-sweatshirt-main.jpg"
+            data-src="/images/marvel-sweatshirt-main.jpg"
+            alt="Marvel logo colorblock crewneck sweatshirt"
+          />
+        </body>
+      </html>
+    `;
+
+    expect(
+      extractProductImageFromHtml(html, "https://www.example.com/product/marvel-sweatshirt"),
+    ).toBe("https://www.example.com/images/marvel-sweatshirt-main.jpg");
+  });
+
   it("enriches missing product images from merchant pages", async () => {
     const products = await enrichProductsWithMerchantPageImages(
       [
@@ -702,6 +953,33 @@ describe("collectLensProducts", () => {
       expect.objectContaining({
         title: "Already has image",
         image: "https://cdn.example.com/existing.jpg",
+      }),
+    ]);
+  });
+
+  it("enriches missing images for safe merchant pages outside the retail allowlist", async () => {
+    const products = await enrichProductsWithMerchantPageImages(
+      [
+        {
+          title: "Marvel Logo Colorblock Sweatshirt",
+          url: "https://www.nykaaman.com/product/marvel-logo-colorblock-sweatshirt",
+          source: "Nykaa Man",
+        },
+      ],
+      async () =>
+        new Response(
+          '<meta property="og:image" content="https://images.nykaaman.com/marvel-sweatshirt.jpg" />',
+          {
+            status: 200,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          },
+        ),
+    );
+
+    expect(products).toEqual([
+      expect.objectContaining({
+        title: "Marvel Logo Colorblock Sweatshirt",
+        image: "https://images.nykaaman.com/marvel-sweatshirt.jpg",
       }),
     ]);
   });

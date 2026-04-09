@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import { buildAppCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import {
   enforceRateLimit,
   getSupabaseAdmin,
@@ -10,9 +10,9 @@ import {
 } from "../_shared/security.ts";
 import { loadGuestSearchAccessState } from "../_shared/search-access-service.ts";
 
-const corsHeaders = buildAppCorsHeaders();
-
 serve(async (req) => {
+  const corsHeaders = buildAppCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

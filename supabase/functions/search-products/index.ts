@@ -1,7 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import {
+  buildAppCorsHeaders,
+  createSignedImageProxyToken,
+  getRequestOrigin,
+} from "../_shared/app-access.ts";
 import {
   enforceRateLimit,
+  getAppTokenSecret,
   getSupabaseAdmin,
   requireAppToken,
   rateLimitHeaders,
@@ -16,17 +21,17 @@ import {
   enrichProductsWithMerchantPageImages,
   filterLowValueProducts,
   getDomain,
+  isGoogleShoppingProductLink,
   ItemSearchPlan,
   mergeItemResultGroups,
   mergeRankedProducts,
   parseClaudeFallbackItemSearchPlans,
   ProductResult,
+  resolveGoogleShoppingFallbackProducts,
   shouldExpandSearchFallback,
   toShoppingProduct,
 } from "./helpers.ts";
 import { resolveFallbackSearchMarket, resolveSearchMarket, type SearchMarket } from "./market.ts";
-
-const corsHeaders = buildAppCorsHeaders();
 
 interface BrandedItem {
   item_name: string;
@@ -36,6 +41,7 @@ interface BrandedItem {
   material?: string;
   style?: string;
   category?: string;
+  gender?: string;
 }
 
 interface SearchFetchResult {
@@ -56,6 +62,25 @@ type ClaudeResponse = {
 
 const ENABLE_AUTOMATIC_MARKET_FALLBACK = false;
 const SEARCH_RATE_LIMIT = 8;
+
+function isGoogleHostedCommerceImage(url?: string): boolean {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+
+    const isGoogleImageHost =
+      domain.endsWith("gstatic.com")
+      || domain.endsWith("googleusercontent.com")
+      || domain.endsWith("ggpht.com");
+
+    return isGoogleImageHost
+      && (parsed.pathname.toLowerCase().includes("/shopping") || parsed.searchParams.has("q"));
+  } catch {
+    return false;
+  }
+}
 
 function sanitizeSearchTerm(value: unknown, maxLength: number): string {
   if (typeof value !== "string") return "";
@@ -414,6 +439,45 @@ async function runSearchesForMarket(
     }
   }
 
+  const itemGroupsNeedingResolution = Object.entries(itemResults).filter(([, products]) => {
+    const directMerchantCount = products.filter((product) => !isGoogleShoppingProductLink(product.url)).length;
+    const googleFallbackCount = products.filter((product) => isGoogleShoppingProductLink(product.url)).length;
+    return googleFallbackCount > 0 && directMerchantCount < 2;
+  });
+
+  if (itemGroupsNeedingResolution.length > 0) {
+    const resolvedEntries = await Promise.all(
+      itemGroupsNeedingResolution.map(async ([itemName, products]) => {
+        const resolvedProducts = await resolveGoogleShoppingFallbackProducts(
+          products,
+          apiKey,
+          market,
+          fetch,
+          3,
+        );
+
+        return [itemName, resolvedProducts] as const;
+      }),
+    );
+
+    itemResults = {
+      ...itemResults,
+      ...Object.fromEntries(resolvedEntries),
+    };
+
+    allProducts = mergeRankedProducts(
+      [
+        ...officialResults.map((group) => group.products),
+        ...brandResults.map((group) => group.products),
+        ...Object.values(itemResults),
+        lensResult.products,
+      ],
+      market,
+      normalizedBrandDomain,
+      market.resultLimit,
+    );
+  }
+
   return {
     upstreamErrors,
     officialResults,
@@ -475,7 +539,45 @@ async function buildAiFallbackSearchPlans(
   );
 }
 
+async function attachSignedProxyImageUrls(
+  products: ProductResult[],
+  origin: string | null,
+): Promise<ProductResult[]> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!supabaseUrl || products.length === 0) {
+    return products;
+  }
+
+  const secret = getAppTokenSecret();
+  const issuedAt = new Date();
+
+  return await Promise.all(
+    products.map(async (product) => {
+      if (!product.image || product.proxyImageUrl) {
+        return product;
+      }
+
+      const token = await createSignedImageProxyToken({
+        secret,
+        imageUrl: product.image,
+        merchantUrl: product.url,
+        ttlSeconds: 60 * 60,
+        now: issuedAt,
+        origin,
+      });
+
+      return {
+        ...product,
+        proxyImageUrl: `${supabaseUrl}/functions/v1/proxy-product-image?token=${encodeURIComponent(token)}`,
+      };
+    }),
+  );
+}
+
 serve(async (req) => {
+  const origin = getRequestOrigin(req);
+  const corsHeaders = buildAppCorsHeaders(origin);
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -554,6 +656,7 @@ serve(async (req) => {
           material: sanitizeSearchTerm(item?.material, 60),
           style: sanitizeSearchTerm(item?.style, 60),
           category: sanitizeSearchTerm(item?.category, 40),
+          gender: sanitizeSearchTerm(item?.gender, 20),
       })).filter((item) => item.search_query.length > 0)
       : [];
 
@@ -685,6 +788,7 @@ serve(async (req) => {
       allProducts = filterLowValueProducts(
         await enrichProductsWithMerchantPageImages(allProducts),
       );
+      allProducts = await attachSignedProxyImageUrls(allProducts, origin);
 
       const productsByUrl = new Map(
         allProducts.map((product) => [product.url, product] as const),

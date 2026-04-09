@@ -1,13 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import { buildAppCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import {
   enforceRateLimit,
   getSupabaseAdmin,
   requireAppToken,
   rateLimitHeaders,
 } from "../_shared/security.ts";
-
-const corsHeaders = buildAppCorsHeaders();
 
 const ALLOWED_EVENTS = new Set([
   "search_link_submitted",
@@ -41,6 +39,8 @@ function sanitizeMetadata(value: unknown): Record<string, unknown> {
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAppCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

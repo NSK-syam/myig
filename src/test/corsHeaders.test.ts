@@ -8,9 +8,9 @@ import {
 
 describe("app function cors headers", () => {
   it("allows both app and guest token headers for browser preflight requests", () => {
-    const headers = buildAppCorsHeaders();
+    const headers = buildAppCorsHeaders("https://searchoutfit.com");
 
-    expect(headers["Access-Control-Allow-Origin"]).toBe("*");
+    expect(headers["Access-Control-Allow-Origin"]).toBe("https://searchoutfit.com");
     expect(headers["Access-Control-Allow-Headers"]).toContain(APP_TOKEN_HEADER);
     expect(headers["Access-Control-Allow-Headers"]).toContain(GUEST_TOKEN_HEADER);
   });

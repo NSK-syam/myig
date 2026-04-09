@@ -1,17 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
-
-vi.mock('@/integrations/supabase/client', () => ({
-  SUPABASE_URL: 'https://uqrxaffgnmnaewaaqmmh.supabase.co',
-}));
+import { describe, expect, it } from 'vitest';
 
 const { buildProductImageUrl } = await import('@/lib/productImages');
 
 describe('buildProductImageUrl', () => {
-  it('returns a proxied URL for standard merchant-hosted images', () => {
+  it('uses the server-signed proxy URL for standard merchant-hosted images', () => {
+    const imageUrl = 'https://cdn.example.com/products/top.jpg';
+    const merchantUrl = 'https://shop.example.com/products/top';
+    const proxyImageUrl = 'https://uqrxaffgnmnaewaaqmmh.supabase.co/functions/v1/proxy-product-image?token=signed-token';
+
+    expect(buildProductImageUrl(imageUrl, merchantUrl, proxyImageUrl)).toBe(proxyImageUrl);
+  });
+
+  it('falls back to the raw image URL when no server-signed proxy URL exists', () => {
     const imageUrl = 'https://cdn.example.com/products/top.jpg';
     const merchantUrl = 'https://shop.example.com/products/top';
 
-    expect(buildProductImageUrl(imageUrl, merchantUrl)).toContain('/functions/v1/proxy-product-image?');
+    expect(buildProductImageUrl(imageUrl, merchantUrl)).toBe(imageUrl);
   });
 
   it('bypasses the proxy for Google Shopping thumbnails', () => {

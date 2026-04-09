@@ -4,6 +4,7 @@ export interface ProductResult {
   title: string;
   url: string;
   image?: string;
+  proxyImageUrl?: string;
   price?: string;
   originalPrice?: string;
   discount?: string;
@@ -12,6 +13,9 @@ export interface ProductResult {
   shipping?: string;
   source?: string;
   badge?: string;
+  productId?: string;
+  immersiveProductPageToken?: string;
+  immersiveApiUrl?: string;
 }
 
 export interface SearchQuerySeed {
@@ -22,6 +26,7 @@ export interface SearchQuerySeed {
   material?: string;
   style?: string;
   category?: string;
+  gender?: string;
 }
 
 export interface ItemSearchPlan {
@@ -35,6 +40,12 @@ export interface ItemResultGroup {
 }
 
 type MerchantPageFetcher = (input: string, init?: RequestInit) => Promise<Response>;
+
+interface GoogleShoppingIdentifiers {
+  productId?: string;
+  immersiveProductPageToken?: string;
+  immersiveApiUrl?: string;
+}
 
 interface ClaudeFallbackPlanCandidate {
   itemName?: unknown;
@@ -133,12 +144,52 @@ export function isRetailDomain(url: string): boolean {
   return ALLOWED_RETAIL_DOMAINS.some((allowed) => matchesAllowedHost(domain, allowed));
 }
 
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  const [first, second] = parts;
+  if (first === 10 || first === 127) return true;
+  if (first === 169 && second === 254) return true;
+  if (first === 172 && second >= 16 && second <= 31) return true;
+  if (first === 192 && second === 168) return true;
+  if (first === 0) return true;
+  return false;
+}
+
+function isPrivateIpv6(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  return normalized === "::1"
+    || normalized.startsWith("fc")
+    || normalized.startsWith("fd")
+    || normalized.startsWith("fe80:")
+    || normalized === "::";
+}
+
+export function isProxySafePublicUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) return false;
+    if (isPrivateIpv4(hostname) || isPrivateIpv6(hostname)) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function isFashionProduct(title: string): boolean {
   const lower = title.toLowerCase();
   return FASHION_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
-function isGoogleShoppingProductLink(url: string): boolean {
+export function isGoogleShoppingProductLink(url?: string): boolean {
+  if (!url) return false;
   try {
     const parsed = new URL(url);
     const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
@@ -192,6 +243,84 @@ function normalizeValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function parseGoogleShoppingIdentifiers(candidate?: string): GoogleShoppingIdentifiers {
+  const normalized = normalizeValue(candidate);
+  if (!normalized) return {};
+
+  try {
+    const parsed = new URL(normalized);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    let productId: string | undefined;
+    let immersiveProductPageToken: string | undefined;
+    let immersiveApiUrl: string | undefined;
+
+    if (domain.includes("google.com")) {
+      const pathMatch = parsed.pathname.match(/\/shopping\/product\/([^/?]+)/i);
+      if (pathMatch?.[1]) {
+        productId = pathMatch[1];
+      }
+
+      const prds = parsed.searchParams.get("prds");
+      if (prds) {
+        for (const rawToken of prds.split(/[;,]/)) {
+          const [rawKey, ...rawValueParts] = rawToken.split(":");
+          const key = rawKey?.trim().toLowerCase();
+          const value = rawValueParts.join(":").trim();
+          if (!key || !value) continue;
+
+          if (!productId && ["pid", "productid", "catalogid", "catalog_id", "cid"].includes(key)) {
+            productId = value;
+          }
+        }
+      }
+    }
+
+    if (domain.includes("serpapi.com")) {
+      if (parsed.searchParams.get("engine") === "google_immersive_product") {
+        immersiveApiUrl = parsed.toString();
+      }
+
+      immersiveProductPageToken = normalizeValue(parsed.searchParams.get("page_token"));
+    }
+
+    return { productId, immersiveProductPageToken, immersiveApiUrl };
+  } catch {
+    return {};
+  }
+}
+
+function buildImmersiveProductApiUrl(
+  market: SearchMarket,
+  apiKey: string,
+  candidateUrl?: string,
+  pageToken?: string,
+): string | undefined {
+  try {
+    const parsed = candidateUrl ? new URL(candidateUrl) : new URL("https://serpapi.com/search.json");
+    if (!parsed.hostname.replace(/^www\./, "").toLowerCase().includes("serpapi.com")) {
+      return undefined;
+    }
+
+    if (!parsed.searchParams.get("engine")) {
+      parsed.searchParams.set("engine", "google_immersive_product");
+    }
+
+    if (!parsed.searchParams.get("page_token") && pageToken) {
+      parsed.searchParams.set("page_token", pageToken);
+    }
+
+    if (!parsed.searchParams.get("page_token")) return undefined;
+
+    parsed.searchParams.set("gl", market.gl);
+    parsed.searchParams.set("hl", market.hl);
+    parsed.searchParams.set("more_stores", "1");
+    parsed.searchParams.set("api_key", apiKey);
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function decodeHtmlAttribute(value: string): string {
   return value
     .replace(/&amp;/gi, "&")
@@ -212,6 +341,34 @@ function resolveImageUrl(value: string, pageUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseSrcsetCandidates(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim().split(/\s+/)[0])
+    .filter((entry) => entry.length > 0);
+}
+
+function isLikelyProductImageCandidate(value: string): boolean {
+  const lower = value.toLowerCase();
+
+  if (lower.endsWith(".svg")) return false;
+
+  const blockedFragments = [
+    "logo",
+    "icon",
+    "sprite",
+    "avatar",
+    "placeholder",
+    "spacer",
+    "blank",
+    "tracking",
+    "pixel",
+    "favicon",
+  ];
+
+  return !blockedFragments.some((fragment) => lower.includes(fragment));
 }
 
 function extractMetaAttributes(markup: string): Record<string, string> {
@@ -268,6 +425,44 @@ export function extractProductImageFromHtml(html: string, pageUrl: string): stri
     }
   }
 
+  for (const match of html.matchAll(/<link\b([^>]+)>/gi)) {
+    const attrs = extractMetaAttributes(match[1] ?? "");
+    const rel = (attrs.rel || "").toLowerCase();
+    const as = (attrs.as || "").toLowerCase();
+    const href = attrs.href;
+    if (!href) continue;
+    if (!(rel.includes("preload") || rel.includes("image"))) continue;
+    if (as && as !== "image") continue;
+    if (!isLikelyProductImageCandidate(href)) continue;
+
+    const resolved = resolveImageUrl(href, pageUrl);
+    if (resolved) return resolved;
+  }
+
+  for (const match of html.matchAll(/<img\b([^>]+)>/gi)) {
+    const attrs = extractMetaAttributes(match[1] ?? "");
+    const rawCandidates = [
+      attrs.src,
+      attrs["data-src"],
+      attrs["data-original"],
+      attrs["data-image"],
+      attrs["data-lazy-src"],
+    ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+    const srcsetCandidates = [
+      attrs.srcset,
+      attrs["data-srcset"],
+    ]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .flatMap((value) => parseSrcsetCandidates(value));
+
+    for (const candidate of [...rawCandidates, ...srcsetCandidates]) {
+      if (!isLikelyProductImageCandidate(candidate)) continue;
+      const resolved = resolveImageUrl(candidate, pageUrl);
+      if (resolved) return resolved;
+    }
+  }
+
   for (const match of html.matchAll(/<script\b[^>]*type=(['"])application\/ld\+json\1[^>]*>([\s\S]*?)<\/script>/gi)) {
     const raw = match[2]?.trim();
     if (!raw) continue;
@@ -293,7 +488,7 @@ export async function enrichProductsWithMerchantPageImages(
   maxFetches = 8,
 ): Promise<ProductResult[]> {
   const targets = products
-    .filter((product) => !product.image && product.url && isRetailDomain(product.url) && isLikelyProductUrl(product.url))
+    .filter((product) => !product.image && product.url && isProxySafePublicUrl(product.url) && isLikelyProductUrl(product.url))
     .slice(0, maxFetches);
 
   if (targets.length === 0) return products;
@@ -344,6 +539,14 @@ function pickExtension(extensions: string[], matcher: (value: string) => boolean
 export function toShoppingProduct(result: Record<string, unknown>, badge?: string): ProductResult | null {
   const title = normalizeValue(result.title);
   const url = normalizeValue(result.link) ?? normalizeValue(result.product_link);
+  const urlDerivedIds = parseGoogleShoppingIdentifiers(url);
+  const immersiveApiUrl = normalizeValue(result.serpapi_immersive_product_api) ?? urlDerivedIds.immersiveApiUrl;
+  const immersiveApiDerivedIds = parseGoogleShoppingIdentifiers(immersiveApiUrl);
+  const productId = normalizeValue(result.product_id) ?? urlDerivedIds.productId ?? immersiveApiDerivedIds.productId;
+  const immersiveProductPageToken =
+    normalizeValue(result.immersive_product_page_token)
+    ?? immersiveApiDerivedIds.immersiveProductPageToken
+    ?? urlDerivedIds.immersiveProductPageToken;
   const isGoogleShoppingFallback = isGoogleShoppingProductLink(url);
   if (!title || !url) return null;
   if (getDomain(url).includes("google.com") && !isGoogleShoppingFallback) return null;
@@ -383,7 +586,258 @@ export function toShoppingProduct(result: Record<string, unknown>, badge?: strin
     shipping,
     source: normalizeValue(result.source) ?? (getDomain(url) || undefined),
     badge,
+    productId,
+    immersiveProductPageToken,
+    immersiveApiUrl,
   };
+}
+
+function extractDirectMerchantUrl(candidate?: string): string | undefined {
+  const normalized = normalizeValue(candidate);
+  if (!normalized) return undefined;
+
+  try {
+    const parsed = new URL(normalized);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+
+    if (domain.includes("google.com")) {
+      const redirectTarget = parsed.searchParams.get("q") ?? parsed.searchParams.get("url");
+      if (!redirectTarget) return undefined;
+      return extractDirectMerchantUrl(redirectTarget);
+    }
+
+    if (!isProxySafePublicUrl(normalized)) return undefined;
+    if (!isLikelyProductUrl(normalized)) return undefined;
+    return normalized;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseSellerPrice(value: unknown): string | undefined {
+  if (typeof value === "number") return `$${value}`;
+  return normalizeValue(value);
+}
+
+function collectSellerTextSignals(seller: Record<string, unknown>): string[] {
+  const values: string[] = [];
+  const directKeys = [
+    "details_and_offers",
+    "delivery",
+    "returns",
+    "condition",
+    "extensions",
+    "badge",
+    "shipping",
+    "availability",
+  ];
+
+  for (const key of directKeys) {
+    const raw = seller[key];
+    if (Array.isArray(raw)) {
+      values.push(...raw.filter((value): value is string => typeof value === "string" && value.trim().length > 0));
+    } else if (typeof raw === "string" && raw.trim().length > 0) {
+      values.push(raw);
+    } else if (raw && typeof raw === "object") {
+      for (const nested of Object.values(raw as Record<string, unknown>)) {
+        if (typeof nested === "string" && nested.trim().length > 0) {
+          values.push(nested);
+        }
+      }
+    }
+  }
+
+  return values;
+}
+
+function sellerToProductResult(
+  seller: Record<string, unknown>,
+  fallbackProduct: ProductResult,
+  badge?: string,
+): ProductResult | null {
+  const directUrl = extractDirectMerchantUrl(
+    normalizeValue(seller.direct_link)
+      ?? normalizeValue(seller.link)
+      ?? normalizeValue(seller.url),
+  );
+  if (!directUrl) return null;
+
+  const signals = collectSellerTextSignals(seller);
+  const badgeValue = normalizeValue(seller.badge);
+  const shipping = normalizeValue(seller.shipping)
+    ?? pickExtension(signals, (value) => value.includes("delivery") || value.includes("shipping") || value.includes("pickup"));
+  const availability = normalizeValue(seller.availability)
+    ?? pickExtension(signals, (value) => value.includes("in stock") || value.includes("out of stock") || value.includes("limited stock") || value.includes("sold out"));
+  const offer = badgeValue
+    ?? pickExtension(signals, (value) => value.includes("offer") || value.includes("coupon") || value.includes("member") || value.includes("cash back") || value.includes("deal"));
+
+  return {
+    ...fallbackProduct,
+    url: directUrl,
+    source: normalizeValue(seller.name) ?? fallbackProduct.source,
+    price: parseSellerPrice(seller.price) ?? parseSellerPrice(seller.base_price) ?? parseSellerPrice(seller.total_price) ?? fallbackProduct.price,
+    originalPrice: parseSellerPrice(seller.original_price) ?? fallbackProduct.originalPrice,
+    shipping: shipping ?? fallbackProduct.shipping,
+    availability: availability ?? fallbackProduct.availability,
+    offer: offer ?? fallbackProduct.offer,
+    badge: badge ?? fallbackProduct.badge,
+  };
+}
+
+function storeToProductResult(
+  store: Record<string, unknown>,
+  fallbackProduct: ProductResult,
+  badge?: string,
+): ProductResult | null {
+  const directUrl = extractDirectMerchantUrl(
+    normalizeValue(store.link)
+      ?? normalizeValue(store.direct_link)
+      ?? normalizeValue(store.url),
+  );
+  if (!directUrl) return null;
+
+  const signals = collectSellerTextSignals(store);
+  const badgeValue = normalizeValue(store.tag) ?? normalizeValue(store.badge);
+  const shipping = normalizeValue(store.shipping)
+    ?? pickExtension(signals, (value) => value.includes("delivery") || value.includes("shipping") || value.includes("pickup"));
+  const availability = normalizeValue(store.availability)
+    ?? pickExtension(signals, (value) => value.includes("in stock") || value.includes("out of stock") || value.includes("limited stock") || value.includes("sold out"));
+  const offer = normalizeValue(store.coupon)
+    ?? badgeValue
+    ?? pickExtension(signals, (value) => value.includes("offer") || value.includes("coupon") || value.includes("member") || value.includes("cash back") || value.includes("deal"));
+
+  return {
+    ...fallbackProduct,
+    title: normalizeValue(store.title) ?? fallbackProduct.title,
+    url: directUrl,
+    source: normalizeValue(store.name) ?? fallbackProduct.source,
+    price: parseSellerPrice(store.price) ?? parseSellerPrice(store.base_price) ?? parseSellerPrice(store.total_price) ?? fallbackProduct.price,
+    originalPrice: parseSellerPrice(store.original_price) ?? fallbackProduct.originalPrice,
+    shipping: shipping ?? fallbackProduct.shipping,
+    availability: availability ?? fallbackProduct.availability,
+    offer: offer ?? fallbackProduct.offer,
+    badge: badge ?? fallbackProduct.badge,
+  };
+}
+
+function getGoogleShoppingResolutionKey(product: ProductResult): string | undefined {
+  return product.immersiveProductPageToken ?? product.productId ?? normalizeValue(product.immersiveApiUrl) ?? product.url;
+}
+
+async function resolveImmersiveProductStores(
+  product: ProductResult,
+  apiKey: string,
+  market: SearchMarket,
+  fetcher: MerchantPageFetcher,
+): Promise<ProductResult[]> {
+  const immersiveApiUrl = buildImmersiveProductApiUrl(
+    market,
+    apiKey,
+    product.immersiveApiUrl,
+    product.immersiveProductPageToken,
+  );
+  if (!immersiveApiUrl) return [];
+
+  const response = await fetcher(immersiveApiUrl);
+  if (!response.ok) return [];
+
+  const data = await response.json();
+  const stores = Array.isArray(data?.product_results?.stores)
+    ? data.product_results.stores as Array<Record<string, unknown>>
+    : [];
+
+  return stores
+    .map((store) => storeToProductResult(store, product))
+    .filter((store): store is ProductResult => Boolean(store));
+}
+
+async function resolveLegacyGoogleProductStores(
+  product: ProductResult,
+  apiKey: string,
+  market: SearchMarket,
+  fetcher: MerchantPageFetcher,
+): Promise<ProductResult[]> {
+  const productId = product.productId;
+  if (!productId) return [];
+
+  const params = new URLSearchParams({
+    engine: "google_product",
+    product_id: productId,
+    offers: "1",
+    gl: market.gl,
+    hl: market.hl,
+    api_key: apiKey,
+  });
+
+  const response = await fetcher(`https://serpapi.com/search.json?${params.toString()}`);
+  if (!response.ok) return [];
+
+  const data = await response.json();
+  const onlineSellers = Array.isArray(data?.sellers_results?.online_sellers)
+    ? data.sellers_results.online_sellers as Array<Record<string, unknown>>
+    : [];
+
+  return onlineSellers
+    .map((seller) => sellerToProductResult(seller, product))
+    .filter((seller): seller is ProductResult => Boolean(seller));
+}
+
+export async function resolveGoogleShoppingFallbackProducts(
+  products: ProductResult[],
+  apiKey: string,
+  market: SearchMarket,
+  fetcher: MerchantPageFetcher = fetch,
+  maxProductsToResolve = 3,
+): Promise<ProductResult[]> {
+  const targets = products
+    .filter((product) =>
+      isGoogleShoppingProductLink(product.url)
+      && Boolean(product.productId || product.immersiveProductPageToken || product.immersiveApiUrl)
+    )
+    .slice(0, maxProductsToResolve);
+
+  if (targets.length === 0) return products;
+
+  const resolvedByKey = new Map<string, ProductResult[]>();
+
+  await Promise.all(
+    targets.map(async (product) => {
+      const resolutionKey = getGoogleShoppingResolutionKey(product);
+      if (!resolutionKey) return;
+
+      try {
+        let resolvedProducts = product.immersiveProductPageToken || product.immersiveApiUrl
+          ? await resolveImmersiveProductStores(product, apiKey, market, fetcher)
+          : [];
+
+        if (resolvedProducts.length === 0 && product.productId) {
+          resolvedProducts = await resolveLegacyGoogleProductStores(product, apiKey, market, fetcher);
+        }
+
+        if (resolvedProducts.length > 0) {
+          resolvedByKey.set(resolutionKey, resolvedProducts);
+        }
+      } catch {
+        // Ignore offer resolution failures and keep the original fallback row behavior.
+      }
+    }),
+  );
+
+  if (resolvedByKey.size === 0) return products;
+
+  const resolvedProducts: ProductResult[] = [];
+
+  for (const product of products) {
+    const resolutionKey = getGoogleShoppingResolutionKey(product);
+    if (resolutionKey && resolvedByKey.has(resolutionKey)) {
+      resolvedProducts.push(...(resolvedByKey.get(resolutionKey) ?? []));
+      continue;
+    }
+
+    resolvedProducts.push(product);
+  }
+
+  return resolvedProducts;
 }
 
 export function getMarketDomainBucket(
@@ -416,6 +870,68 @@ function normalizeQuery(value: string): string {
 
 function normalizeShoppingTerms(value: string): string {
   return normalizeQuery(value.replace(/[^a-zA-Z0-9\s]/g, " ")).toLowerCase();
+}
+
+type CanonicalGender = "men" | "women" | "unisex";
+
+function extractGenderHints(value: string): Set<CanonicalGender> {
+  const normalized = normalizeShoppingTerms(value);
+  const hints = new Set<CanonicalGender>();
+
+  if (/\bunisex\b/.test(normalized)) {
+    hints.add("unisex");
+  }
+
+  if (/\b(men|mens|man|male)\b/.test(normalized)) {
+    hints.add("men");
+  }
+
+  if (/\b(women|womens|woman|female|ladies|lady)\b/.test(normalized)) {
+    hints.add("women");
+  }
+
+  return hints;
+}
+
+function stripGenderTerms(value: string): string {
+  return normalizeQuery(
+    value.replace(/\b(women'?s?|womens|woman|ladies|lady|female|men'?s?|mens|man|male|unisex)\b/gi, " "),
+  );
+}
+
+function resolveSearchGender(item: SearchQuerySeed): CanonicalGender {
+  const explicitHints = extractGenderHints(item.gender || "");
+  const queryHints = extractGenderHints(item.search_query);
+  const combinedHints = new Set<CanonicalGender>([...explicitHints, ...queryHints]);
+
+  if (combinedHints.size === 0) return "unisex";
+  if (combinedHints.has("unisex")) return "unisex";
+  if (combinedHints.size > 1) return "unisex";
+  return combinedHints.values().next().value ?? "unisex";
+}
+
+function normalizeSearchQueryGender(value: string, gender: CanonicalGender): string {
+  const normalized = normalizeQuery(value);
+  if (!normalized) return normalized;
+
+  const queryHints = extractGenderHints(normalized);
+  if (queryHints.size === 0) return normalized;
+  if (queryHints.size === 1 && queryHints.has(gender)) return normalized;
+
+  const stripped = stripGenderTerms(normalized);
+  if (!stripped) return normalized;
+  if (gender === "unisex") return stripped;
+  return `${stripped} ${gender}`;
+}
+
+function appendGenderQualifier(baseQuery: string, gender: CanonicalGender): string | undefined {
+  const normalized = normalizeQuery(baseQuery);
+  if (!normalized) return undefined;
+
+  const queryHints = extractGenderHints(normalized);
+  if (queryHints.size > 0) return undefined;
+
+  return `${normalized} ${gender}`;
 }
 
 function canonicalizeProductUrl(value: string): string {
@@ -640,7 +1156,8 @@ export function buildShoppingQueries(
   for (const item of items.slice(0, 6)) {
     const itemName = normalizeQuery(item.item_name);
     const brand = normalizeQuery(item.brand || detectedBrand);
-    const searchQuery = normalizeQuery(item.search_query);
+    const gender = resolveSearchGender(item);
+    const searchQuery = normalizeSearchQueryGender(item.search_query, gender);
     const color = normalizeShoppingTerms(item.color || "");
     const material = normalizeShoppingTerms(item.material || "");
     const style = normalizeShoppingTerms(item.style || "");
@@ -659,7 +1176,8 @@ export function buildShoppingQueries(
     }
 
     if (baseQuery) {
-      addQuery(`${baseQuery} women`);
+      const genderQualifiedQuery = appendGenderQualifier(baseQuery, gender);
+      if (genderQualifiedQuery) addQuery(genderQualifiedQuery);
       addQuery(`${baseQuery} buy online`);
       addQuery(`${baseQuery} fashion`);
     }
@@ -695,7 +1213,8 @@ export function buildItemSearchPlans(
     const normalizedItemName = normalizeShoppingTerms(item.item_name);
     const brand = normalizeQuery(item.brand);
     const detected = normalizeQuery(detectedBrand);
-    const searchQuery = normalizeQuery(item.search_query);
+    const gender = resolveSearchGender(item);
+    const searchQuery = normalizeSearchQueryGender(item.search_query, gender);
     const color = normalizeShoppingTerms(item.color || "");
     const material = normalizeShoppingTerms(item.material || "");
     const style = normalizeShoppingTerms(item.style || "");
@@ -710,15 +1229,15 @@ export function buildItemSearchPlans(
     };
 
     addQuery(searchQuery);
-    if (color && normalizedItemName) addQuery(`${color} ${normalizedItemName}`);
-    if (material && color && normalizedItemName) addQuery(`${color} ${material} ${normalizedItemName}`);
-    if (style && color && normalizedItemName) addQuery(`${color} ${style} ${normalizedItemName}`);
+    if (color && normalizedItemName) addQuery(`${color} ${normalizedItemName} ${gender}`);
+    if (material && color && normalizedItemName) addQuery(`${color} ${material} ${normalizedItemName} ${gender}`);
+    if (style && color && normalizedItemName) addQuery(`${color} ${style} ${normalizedItemName} ${gender}`);
     if (brand && itemName) addQuery(`${brand} ${itemName}`);
     if (brand && color && normalizedItemName) addQuery(`${brand} ${color} ${normalizedItemName}`);
     addQuery(itemName);
     if (detected && itemName && !brand) addQuery(`${detected} ${itemName}`);
-    if (category && color) addQuery(`${color} ${category} women`);
-    if (itemName) addQuery(`${itemName} women`);
+    if (category && color) addQuery(`${color} ${category} ${gender}`);
+    if (itemName) addQuery(`${itemName} ${gender}`);
     if (itemName) addQuery(`${itemName} buy online`);
     if (itemName) addQuery(`${itemName} fashion`);
     if (itemName) addQuery(`${itemName} online store`);
@@ -819,6 +1338,7 @@ export function mergeRankedProducts(
   const preferredProducts: ProductResult[] = [];
   const neutralProducts: ProductResult[] = [];
   const deprioritizedProducts: ProductResult[] = [];
+  const indirectGoogleProducts: ProductResult[] = [];
   const deprioritizedCounts: Record<string, number> = {};
 
   for (const group of groups) {
@@ -851,6 +1371,11 @@ export function mergeRankedProducts(
         continue;
       }
 
+      if (isGoogleShoppingProductLink(product.url)) {
+        indirectGoogleProducts.push(product);
+        continue;
+      }
+
       const deprioritizedDomain = DEPRIORITIZED_DOMAINS.find((allowed) => matchesAllowedHost(domain, allowed));
       if (deprioritizedDomain) {
         deprioritizedCounts[deprioritizedDomain] = (deprioritizedCounts[deprioritizedDomain] || 0) + 1;
@@ -868,6 +1393,7 @@ export function mergeRankedProducts(
     ...preferredProducts,
     ...neutralProducts,
     ...deprioritizedProducts,
+    ...indirectGoogleProducts,
   ].slice(0, resultLimit);
 }
 

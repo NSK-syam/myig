@@ -2,18 +2,17 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 import {
+  buildAuthenticatedCorsHeaders,
+  getRequestOrigin,
+  isAllowedAdminEmail,
+} from "../_shared/app-access.ts";
+import {
   enforceRateLimit,
   getAnalyticsAdminAllowlist,
   getSupabaseAdmin,
   rateLimitHeaders,
+  requireAllowedAppOrigin,
 } from "../_shared/security.ts";
-import { isAllowedAdminEmail } from "../_shared/app-access.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
 
 const ALLOWED_EVENTS = [
   "search_link_submitted",
@@ -93,11 +92,21 @@ async function countMarketEvents(
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAuthenticatedCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    const originCheck = requireAllowedAppOrigin(req);
+    if (!originCheck.allowed) {
+      return new Response(
+        JSON.stringify({ error: originCheck.error }),
+        { status: originCheck.status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     const user = await requireUser(req);
     if (!user) {
       return new Response(

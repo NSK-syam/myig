@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import { buildAppCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import { getAuthenticatedUser } from "../_shared/auth.ts";
 import { consumeGuestSearchAccess } from "../_shared/search-access-service.ts";
 import {
@@ -31,8 +31,6 @@ type InstagramGraphQLMedia = {
   edge_media_to_caption?: { edges?: Array<{ node?: { text?: string } }> };
   is_video?: boolean;
 };
-
-const corsHeaders = buildAppCorsHeaders();
 
 // Instagram internal GraphQL doc_id — rotates every 2-4 weeks
 const DOC_ID = "10015901848480474";
@@ -200,6 +198,8 @@ async function proxyAndStore(
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAppCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

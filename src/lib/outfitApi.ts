@@ -99,6 +99,7 @@ export interface OutfitItem {
   brand_guess: string;
   price_estimate: string;
   confidence: "high" | "medium" | "low";
+  gender: string;
   search_query: string;
   shopping_links: string[];
 }
@@ -127,6 +128,7 @@ export interface ProductResult {
   title: string;
   url: string;
   image?: string;
+  proxyImageUrl?: string;
   price?: string;
   originalPrice?: string;
   discount?: string;
@@ -240,6 +242,7 @@ export async function searchProductsByImage(
     material: item.material || "",
     style: item.style || "",
     category: item.category || "",
+    gender: item.gender || "",
   }));
 
   const { data, error } = await invokeAppFunction("search-products", {

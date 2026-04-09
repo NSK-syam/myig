@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildAppCorsHeaders } from "../_shared/app-access.ts";
+import { buildAppCorsHeaders, getRequestOrigin } from "../_shared/app-access.ts";
 import {
   IMAGE_BUCKET,
   createSignedImageUrl,
@@ -9,8 +9,6 @@ import {
   requireAppToken,
   rateLimitHeaders,
 } from "../_shared/security.ts";
-
-const corsHeaders = buildAppCorsHeaders();
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -38,6 +36,8 @@ function extensionFor(contentType: string): string {
 }
 
 serve(async (req) => {
+  const corsHeaders = buildAppCorsHeaders(getRequestOrigin(req));
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

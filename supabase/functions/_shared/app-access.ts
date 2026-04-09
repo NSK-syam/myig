@@ -32,15 +32,37 @@ export const DEFAULT_ANALYTICS_ADMIN_EMAILS = [
   "syam31158@gmail.com",
 ];
 
-export function buildAppCorsHeaders(): Record<string, string> {
+function resolveCorsOrigin(origin: string | null, allowedOrigins: Set<string>): string {
+  if (isAllowedOrigin(origin, allowedOrigins) && origin) {
+    return origin;
+  }
+
+  return DEFAULT_ALLOWED_APP_ORIGINS[0] ?? "https://searchoutfit.com";
+}
+
+function buildCorsHeaders(
+  origin: string | null,
+  { includeAppHeaders = false }: { includeAppHeaders?: boolean } = {},
+): Record<string, string> {
+  const headers = [
+    ...DEFAULT_CORS_ALLOWED_HEADERS,
+    ...(includeAppHeaders ? [APP_TOKEN_HEADER, GUEST_TOKEN_HEADER] : []),
+  ];
+
   return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": [
-      ...DEFAULT_CORS_ALLOWED_HEADERS,
-      APP_TOKEN_HEADER,
-      GUEST_TOKEN_HEADER,
-    ].join(", "),
+    "Access-Control-Allow-Origin": resolveCorsOrigin(origin, parseAllowedOrigins()),
+    "Access-Control-Allow-Headers": headers.join(", "),
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Vary": "Origin",
   };
+}
+
+export function buildAppCorsHeaders(origin: string | null = null): Record<string, string> {
+  return buildCorsHeaders(origin, { includeAppHeaders: true });
+}
+
+export function buildAuthenticatedCorsHeaders(origin: string | null = null): Record<string, string> {
+  return buildCorsHeaders(origin);
 }
 
 function normalizeEmail(value: string): string {
@@ -139,6 +161,23 @@ type GuestTokenPayload = {
   origin?: string;
 };
 
+type ProofOfWorkChallengePayload = {
+  type: "pow-v1";
+  sub: string;
+  nonce: string;
+  difficulty: number;
+  exp: number;
+  origin?: string;
+};
+
+type ImageProxyTokenPayload = {
+  type: "proxy-image-v1";
+  imageUrl: string;
+  merchantUrl?: string;
+  exp: number;
+  origin?: string;
+};
+
 function bytesToBase64Url(bytes: Uint8Array): string {
   const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -167,6 +206,13 @@ async function signPayload(secret: string, encodedPayload: string): Promise<stri
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
+async function sha256Hex(value: string): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function parseTokenPayload(token: string): { encodedPayload: string; signature: string; payload: AppTokenPayload } {
   const [encodedPayload, signature] = token.split(".");
   if (!encodedPayload || !signature) {
@@ -192,6 +238,46 @@ function parseGuestTokenPayload(token: string): { encodedPayload: string; signat
   const payload = JSON.parse(decoded) as GuestTokenPayload;
   if (!payload.guestId || !payload.exp) {
     throw new Error("Guest token payload is invalid");
+  }
+
+  return { encodedPayload, signature, payload };
+}
+
+function parseProofOfWorkChallengePayload(
+  token: string,
+): { encodedPayload: string; signature: string; payload: ProofOfWorkChallengePayload } {
+  const [encodedPayload, signature] = token.split(".");
+  if (!encodedPayload || !signature) {
+    throw new Error("Proof-of-work challenge token is malformed");
+  }
+
+  const decoded = base64UrlToString(encodedPayload);
+  const payload = JSON.parse(decoded) as ProofOfWorkChallengePayload;
+  if (
+    payload.type !== "pow-v1"
+    || !payload.sub
+    || !payload.nonce
+    || !Number.isFinite(payload.difficulty)
+    || !payload.exp
+  ) {
+    throw new Error("Proof-of-work challenge payload is invalid");
+  }
+
+  return { encodedPayload, signature, payload };
+}
+
+function parseImageProxyTokenPayload(
+  token: string,
+): { encodedPayload: string; signature: string; payload: ImageProxyTokenPayload } {
+  const [encodedPayload, signature] = token.split(".");
+  if (!encodedPayload || !signature) {
+    throw new Error("Image proxy token is malformed");
+  }
+
+  const decoded = base64UrlToString(encodedPayload);
+  const payload = JSON.parse(decoded) as ImageProxyTokenPayload;
+  if (payload.type !== "proxy-image-v1" || !payload.imageUrl || !payload.exp) {
+    throw new Error("Image proxy token payload is invalid");
   }
 
   return { encodedPayload, signature, payload };
@@ -254,6 +340,154 @@ export async function createGuestToken({
   const encodedPayload = stringToBase64Url(JSON.stringify(payload));
   const signature = await signPayload(secret, encodedPayload);
   return `${encodedPayload}.${signature}`;
+}
+
+export async function createProofOfWorkChallengeToken({
+  secret,
+  clientIp,
+  ttlSeconds,
+  difficulty,
+  now = new Date(),
+  origin,
+}: {
+  secret: string;
+  clientIp: string;
+  ttlSeconds: number;
+  difficulty: number;
+  now?: Date;
+  origin?: string | null;
+}): Promise<string> {
+  const payload: ProofOfWorkChallengePayload = {
+    type: "pow-v1",
+    sub: clientIp,
+    nonce: crypto.randomUUID(),
+    difficulty,
+    exp: Math.floor(now.getTime() / 1000) + ttlSeconds,
+  };
+
+  const normalizedOrigin = origin ? normalizeOrigin(origin) : null;
+  if (normalizedOrigin) {
+    payload.origin = normalizedOrigin;
+  }
+
+  const encodedPayload = stringToBase64Url(JSON.stringify(payload));
+  const signature = await signPayload(secret, encodedPayload);
+  return `${encodedPayload}.${signature}`;
+}
+
+export async function verifyProofOfWorkChallengeToken({
+  token,
+  solution,
+  secret,
+  clientIp,
+  now = new Date(),
+  origin,
+}: {
+  token: string;
+  solution: string;
+  secret: string;
+  clientIp: string;
+  now?: Date;
+  origin?: string | null;
+}): Promise<true> {
+  const { encodedPayload, signature, payload } = parseProofOfWorkChallengePayload(token);
+  const expectedSignature = await signPayload(secret, encodedPayload);
+
+  if (signature !== expectedSignature) {
+    throw new Error("Proof-of-work challenge signature is invalid");
+  }
+
+  if (payload.exp <= Math.floor(now.getTime() / 1000)) {
+    throw new Error("Proof-of-work challenge has expired");
+  }
+
+  if (payload.sub !== clientIp) {
+    throw new Error("Proof-of-work challenge is invalid for this client");
+  }
+
+  const normalizedOrigin = origin ? normalizeOrigin(origin) : null;
+  if (payload.origin && payload.origin !== normalizedOrigin) {
+    throw new Error("Proof-of-work challenge is invalid for this origin");
+  }
+
+  if (!/^[a-f0-9]{1,64}$/i.test(solution)) {
+    throw new Error("Proof-of-work challenge solution is invalid");
+  }
+
+  const digest = await sha256Hex(`${token}.${solution}`);
+  if (!digest.startsWith("0".repeat(payload.difficulty))) {
+    throw new Error("Proof-of-work challenge solution is invalid");
+  }
+
+  return true;
+}
+
+export async function createSignedImageProxyToken({
+  secret,
+  imageUrl,
+  merchantUrl,
+  ttlSeconds,
+  now = new Date(),
+  origin,
+}: {
+  secret: string;
+  imageUrl: string;
+  merchantUrl?: string;
+  ttlSeconds: number;
+  now?: Date;
+  origin?: string | null;
+}): Promise<string> {
+  const payload: ImageProxyTokenPayload = {
+    type: "proxy-image-v1",
+    imageUrl,
+    exp: Math.floor(now.getTime() / 1000) + ttlSeconds,
+  };
+
+  if (merchantUrl) {
+    payload.merchantUrl = merchantUrl;
+  }
+
+  const normalizedOrigin = origin ? normalizeOrigin(origin) : null;
+  if (normalizedOrigin) {
+    payload.origin = normalizedOrigin;
+  }
+
+  const encodedPayload = stringToBase64Url(JSON.stringify(payload));
+  const signature = await signPayload(secret, encodedPayload);
+  return `${encodedPayload}.${signature}`;
+}
+
+export async function verifySignedImageProxyToken({
+  token,
+  secret,
+  now = new Date(),
+  origin,
+}: {
+  token: string;
+  secret: string;
+  now?: Date;
+  origin?: string | null;
+}): Promise<{ imageUrl: string; merchantUrl?: string }> {
+  const { encodedPayload, signature, payload } = parseImageProxyTokenPayload(token);
+  const expectedSignature = await signPayload(secret, encodedPayload);
+
+  if (signature !== expectedSignature) {
+    throw new Error("Image proxy token signature is invalid");
+  }
+
+  if (payload.exp <= Math.floor(now.getTime() / 1000)) {
+    throw new Error("Image proxy token has expired");
+  }
+
+  const normalizedOrigin = origin ? normalizeOrigin(origin) : null;
+  if (payload.origin && payload.origin !== normalizedOrigin) {
+    throw new Error("Image proxy token is invalid for this origin");
+  }
+
+  return {
+    imageUrl: payload.imageUrl,
+    merchantUrl: payload.merchantUrl,
+  };
 }
 
 export async function verifyScopedAppToken({

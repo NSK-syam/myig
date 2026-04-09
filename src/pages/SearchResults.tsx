@@ -54,6 +54,26 @@ function matchesAllowedHost(domain: string, allowed: string): boolean {
   return domain === allowed || domain.endsWith(`.${allowed}`);
 }
 
+function isGoogleShoppingResultUrl(url?: string): boolean {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    if (!domain.includes("google.com")) return false;
+
+    return parsed.searchParams.get("ibp") === "oshop"
+      || parsed.searchParams.has("prds")
+      || parsed.pathname.toLowerCase().includes("/shopping/product/");
+  } catch {
+    return false;
+  }
+}
+
+function filterDirectMerchantProducts<T extends { url: string }>(products: T[]): T[] {
+  return products.filter((product) => !isGoogleShoppingResultUrl(product.url));
+}
+
 function sortProducts(products: ProductResult[], brandDomain?: string): DecoratedProduct[] {
   const normalized = brandDomain?.replace("www.", "").toLowerCase() || "";
 
@@ -168,6 +188,7 @@ function scoreProductForItem(product: DecoratedProduct, item: OutfitItem): numbe
 
   if (item.material && haystack.includes(normalizeMatchText(item.material))) score += 3;
   if (item.style && haystack.includes(normalizeMatchText(item.style))) score += 2;
+  if (isGoogleShoppingResultUrl(product.url)) score -= 6;
 
   for (const token of tokenizeItem(item)) {
     if (haystack.includes(token)) {
@@ -287,9 +308,10 @@ function pickRicherComparisonProduct(current: DecoratedProduct, incoming: Decora
 }
 
 function buildComparisonProducts(products: DecoratedProduct[]): DecoratedProduct[] {
+  const directMerchantProducts = filterDirectMerchantProducts(products);
   const deduped = new Map<string, DecoratedProduct>();
 
-  for (const product of products) {
+  for (const product of directMerchantProducts) {
     const key = buildComparisonKey(product);
     const existing = deduped.get(key);
     deduped.set(key, existing ? pickRicherComparisonProduct(existing, product) : product);
@@ -338,6 +360,7 @@ const ComparisonStat = ({
 const ProductImageFrame = ({
   image,
   merchantUrl,
+  proxyImageUrl,
   title,
   className,
   iconClassName = "w-8 h-8",
@@ -345,12 +368,13 @@ const ProductImageFrame = ({
 }: {
   image?: string;
   merchantUrl?: string;
+  proxyImageUrl?: string;
   title: string;
   className: string;
   iconClassName?: string;
   onUnavailable?: () => void;
 }) => {
-  const proxiedImage = buildProductImageUrl(image, merchantUrl);
+  const proxiedImage = buildProductImageUrl(image, merchantUrl, proxyImageUrl);
   const [attemptedRawFallback, setAttemptedRawFallback] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | undefined>(proxiedImage ?? image);
 
@@ -424,6 +448,7 @@ const ProductCard = ({
         <ProductImageFrame
           image={product.image}
           merchantUrl={product.url}
+          proxyImageUrl={product.proxyImageUrl}
           title={product.title}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
           onUnavailable={onImageUnavailable}
@@ -470,6 +495,7 @@ const ItemChip = ({
   item,
   selected,
   resultCount,
+  hasHiddenFallbacks,
   hasLoaded,
   searching,
   searchUnavailable,
@@ -478,6 +504,7 @@ const ItemChip = ({
   item: OutfitItem;
   selected: boolean;
   resultCount: number;
+  hasHiddenFallbacks: boolean;
   hasLoaded: boolean;
   searching: boolean;
   searchUnavailable: boolean;
@@ -513,7 +540,9 @@ const ItemChip = ({
           ? "Search unavailable"
           : resultCount > 0
             ? `${resultCount} store${resultCount === 1 ? "" : "s"}`
-            : "No matches yet"}
+            : hasHiddenFallbacks
+              ? "No direct links yet"
+              : "No matches yet"}
       </span>
     </div>
   </button>
@@ -527,7 +556,10 @@ const ComparisonRow = ({
   product: DecoratedProduct;
   saved: boolean;
   onToggleSave: () => void;
-}) => (
+}) => {
+  const visitLabel = isGoogleShoppingResultUrl(product.url) ? "Google Shopping" : "Visit";
+
+  return (
   <div className="grid gap-4 rounded-sm border border-border bg-card p-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1.35fr)_auto]">
     <div className="min-w-0">
       <div className="flex items-start gap-3">
@@ -535,6 +567,7 @@ const ComparisonRow = ({
           <ProductImageFrame
             image={product.image}
             merchantUrl={product.url}
+            proxyImageUrl={product.proxyImageUrl}
             title={product.title}
             className="h-full w-full object-cover"
             iconClassName="w-4 h-4"
@@ -593,11 +626,12 @@ const ComparisonRow = ({
         rel="noopener noreferrer"
         className="inline-flex items-center justify-center gap-2 rounded-full border border-foreground/15 px-4 py-2 text-sm font-medium text-foreground hover:bg-warm-100 transition-colors"
       >
-        Visit
+        {visitLabel}
       </a>
     </div>
   </div>
-);
+  );
+};
 
 const SearchResults = () => {
   const location = useLocation();
@@ -723,9 +757,7 @@ const SearchResults = () => {
         }));
       })
       .finally(() => {
-        if (!cancelled) {
-          setSearchingKey((current) => (current === cacheKey ? null : current));
-        }
+        setSearchingKey((current) => (current === cacheKey ? null : current));
       });
 
     return () => {
@@ -755,12 +787,20 @@ const SearchResults = () => {
       itemSearchCache[buildItemCacheKey(item.name, market)]?.products ?? [],
     ]),
   ) as DecoratedProductGroups;
+  const directMerchantGroups = Object.fromEntries(
+    Object.entries(groupedProducts).map(([itemName, products]) => [
+      itemName,
+      filterDirectMerchantProducts(products),
+    ]),
+  ) as DecoratedProductGroups;
   const selectedSearchState = selectedItemCacheKey ? itemSearchCache[selectedItemCacheKey] : undefined;
   const productSearchError = selectedSearchState?.error ?? null;
   const productSearchWarning = selectedSearchState?.warning ?? null;
   const searchUnavailable = selectedSearchState?.searchUnavailable ?? false;
   const searching = Boolean(selectedItemCacheKey && searchingKey === selectedItemCacheKey);
-  const currentProducts = selectedItem ? groupedProducts[selectedItem.name] ?? [] : [];
+  const rawCurrentProducts = selectedItem ? groupedProducts[selectedItem.name] ?? [] : [];
+  const currentProducts = selectedItem ? directMerchantGroups[selectedItem.name] ?? [] : [];
+  const hasHiddenGoogleFallbacks = rawCurrentProducts.length > 0 && currentProducts.length === 0;
   const rankedSelectedProducts = selectedItem
     ? [...currentProducts].sort(
         (left, right) => scoreProductForItem(right, selectedItem) - scoreProductForItem(left, selectedItem),
@@ -906,7 +946,8 @@ const SearchResults = () => {
                   key={`${item.name}-${i}`}
                   item={item}
                   selected={item.name === selectedItem?.name}
-                  resultCount={(groupedProducts[item.name] ?? []).length}
+                  resultCount={(directMerchantGroups[item.name] ?? []).length}
+                  hasHiddenFallbacks={(groupedProducts[item.name] ?? []).length > 0 && (directMerchantGroups[item.name] ?? []).length === 0}
                   hasLoaded={Boolean(itemSearchCache[buildItemCacheKey(item.name, market)])}
                   searching={Boolean(searchingKey && searchingKey === buildItemCacheKey(item.name, market))}
                   searchUnavailable={itemSearchCache[buildItemCacheKey(item.name, market)]?.searchUnavailable ?? false}
@@ -969,7 +1010,7 @@ const SearchResults = () => {
             ) : currentProducts.length > 0 && selectedItem ? (
               comparisonProducts.length > 0 ? (
                 <div className="space-y-6">
-                  <div className="grid gap-5 rounded-xl border border-border bg-card p-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)]">
+                  <div className={`grid gap-5 rounded-xl border border-border bg-card p-5 ${exactMatch ? "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)]" : "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]"}`}>
                     <div className="space-y-4">
                       <div>
                         <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground font-medium mb-2">
@@ -1001,12 +1042,13 @@ const SearchResults = () => {
                           </p>
                           <div className="grid gap-4 md:grid-cols-[minmax(0,180px)_minmax(0,1fr)]">
                             <div className="rounded-lg overflow-hidden bg-warm-100 aspect-[3/4]">
-                              <ProductImageFrame
-                                image={exactMatch.image}
-                                merchantUrl={exactMatch.url}
-                                title={exactMatch.title}
-                                className="w-full h-full object-cover"
-                                onUnavailable={() => markVisualImageUnavailable(exactMatch.url)}
+                  <ProductImageFrame
+                    image={exactMatch.image}
+                    merchantUrl={exactMatch.url}
+                    proxyImageUrl={exactMatch.proxyImageUrl}
+                    title={exactMatch.title}
+                    className="w-full h-full object-cover"
+                    onUnavailable={() => markVisualImageUnavailable(exactMatch.url)}
                               />
                             </div>
                             <div className="space-y-3">
@@ -1052,6 +1094,20 @@ const SearchResults = () => {
                             </div>
                           </div>
                         </div>
+                      </div>
+                    )}
+
+                    {!exactMatch && (
+                      <div className="rounded-xl border border-dashed border-border bg-background/60 p-5">
+                        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground font-medium mb-2">
+                          Visual preview
+                        </p>
+                        <p className="text-sm font-medium text-foreground mb-1">
+                          No working product image yet
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Store matches are available below, but this merchant set did not include a usable product photo for the selected item.
+                        </p>
                       </div>
                     )}
                   </div>
@@ -1122,6 +1178,15 @@ const SearchResults = () => {
               <p className="text-sm text-muted-foreground py-8 text-center">
                 Visual product search requires a public image URL. Try using an Instagram link instead of uploading directly.
               </p>
+            ) : hasHiddenGoogleFallbacks ? (
+              <div className="rounded-sm border border-border bg-card px-5 py-6 text-center">
+                <p className="text-sm font-medium text-foreground mb-1">
+                  No direct store links found yet
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  We found Google Shopping aggregator links for this item, but hid them so you only see direct merchant pages.
+                </p>
+              </div>
             ) : (
               <p className="text-sm text-muted-foreground py-8 text-center">
                 No visual product matches found.

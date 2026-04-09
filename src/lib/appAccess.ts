@@ -1,4 +1,8 @@
-import { supabase } from "@/integrations/supabase/client";
+import {
+  SUPABASE_PUBLISHABLE_KEY,
+  SUPABASE_URL,
+  supabase,
+} from "@/integrations/supabase/client";
 
 const APP_TOKEN_HEADER = "x-searchoutfit-token";
 const GUEST_TOKEN_HEADER = "x-searchoutfit-guest";
@@ -16,6 +20,10 @@ const DEFAULT_APP_SCOPES = [
   "ingest-analytics",
 ] as const;
 
+const ISSUE_APP_TOKEN_ENDPOINT = SUPABASE_URL
+  ? `${SUPABASE_URL}/functions/v1/issue-app-token`
+  : "/functions/v1/issue-app-token";
+
 type AppTokenCache = {
   token: string;
   expiresAt: string;
@@ -25,6 +33,23 @@ type GuestTokenCache = {
   expiresAt: string;
   guestId?: string;
   token: string;
+};
+
+type IssueAppTokenSuccess = {
+  guestExpiresAt: string;
+  guestId?: string;
+  guestToken: string;
+  success: true;
+  token: string;
+  expiresAt: string;
+};
+
+type IssueAppTokenChallenge = {
+  error?: string;
+  code: "challenge_required";
+  challengeToken: string;
+  difficulty: number;
+  expiresAt: string;
 };
 
 let inMemoryToken: AppTokenCache | null = null;
@@ -105,6 +130,86 @@ function isGuestTokenUsable(cache: GuestTokenCache | null): cache is GuestTokenC
   return Number.isFinite(expiry) && expiry - Date.now() > GUEST_TOKEN_REFRESH_BUFFER_MS;
 }
 
+async function sha256Hex(value: string): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function solveProofOfWorkChallenge(challengeToken: string, difficulty: number): Promise<string> {
+  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 6) {
+    throw new Error("Unsupported app token challenge difficulty");
+  }
+
+  for (let candidate = 0; candidate < 5_000_000; candidate += 1) {
+    const solution = candidate.toString(16);
+    const digest = await sha256Hex(`${challengeToken}.${solution}`);
+    if (digest.startsWith("0".repeat(difficulty))) {
+      return solution;
+    }
+  }
+
+  throw new Error("Could not solve the app token challenge");
+}
+
+function isChallengeResponse(payload: unknown): payload is IssueAppTokenChallenge {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { code?: unknown }).code === "challenge_required"
+    && typeof (payload as { challengeToken?: unknown }).challengeToken === "string"
+    && typeof (payload as { difficulty?: unknown }).difficulty === "number";
+}
+
+async function requestAppToken(payload: Record<string, unknown>): Promise<{
+  ok: boolean;
+  data: IssueAppTokenSuccess | IssueAppTokenChallenge | { error?: string } | null;
+}> {
+  const response = await fetch(ISSUE_APP_TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_PUBLISHABLE_KEY ?? "",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json().catch(() => null) as IssueAppTokenSuccess | IssueAppTokenChallenge | { error?: string } | null;
+  return { ok: response.ok, data };
+}
+
+async function issueAppToken(guestToken?: string): Promise<IssueAppTokenSuccess> {
+  const basePayload: Record<string, unknown> = {
+    scopes: [...DEFAULT_APP_SCOPES],
+  };
+
+  if (guestToken) {
+    basePayload.guestToken = guestToken;
+  }
+
+  let response = await requestAppToken(basePayload);
+  if (!response.ok && isChallengeResponse(response.data)) {
+    const challengeSolution = await solveProofOfWorkChallenge(
+      response.data.challengeToken,
+      response.data.difficulty,
+    );
+
+    response = await requestAppToken({
+      ...basePayload,
+      challengeSolution,
+      challengeToken: response.data.challengeToken,
+    });
+  }
+
+  if (!response.ok || !response.data || !("success" in response.data) || response.data.success !== true) {
+    const errorMessage = response.data && "error" in response.data && typeof response.data.error === "string"
+      ? response.data.error
+      : "Could not issue an app token";
+    throw new Error(errorMessage);
+  }
+
+  return response.data;
+}
+
 export async function getAppFunctionHeaders(): Promise<Record<string, string>> {
   const cached = readCachedToken();
   const cachedGuest = readCachedGuestToken();
@@ -115,19 +220,9 @@ export async function getAppFunctionHeaders(): Promise<Record<string, string>> {
     };
   }
 
-  const { data, error } = await supabase.functions.invoke("issue-app-token", {
-    body: {
-      guestToken: cachedGuest?.token,
-      scopes: [...DEFAULT_APP_SCOPES],
-    },
-  });
-
-  if (error) {
-    throw new Error(error.message || "Could not issue an app token");
-  }
-
+  const data = await issueAppToken(cachedGuest?.token);
   if (!data?.success || !data?.token || !data?.expiresAt || !data?.guestToken || !data?.guestExpiresAt) {
-    throw new Error(data?.error || "Could not issue an app token");
+    throw new Error("Could not issue an app token");
   }
 
   writeCachedToken({
